@@ -1,0 +1,67 @@
+# ============================================================
+# 口播PPT KouboPPT — Git 忽略规则
+# 原则：只提交源码与构建脚本；体积大、可再生成、含个人数据的一律排除
+# ============================================================
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# ---------- 虚拟环境 ----------
+.venv/
+venv/
+env/
+ENV/
+virtualenv/
+
+# ---------- 构建产物（PyInstaller / Inno Setup）----------
+build/
+dist/
+.build.lock
+*.spec.bak
+
+# ---------- 项目大体积目录 ----------
+# 历史版本备份（本地存档用，421 MB）
+kouboback/
+# 测试教材与测试数据（354 MB）
+Test1/
+# 测试输出（335 MB）
+test_out/
+# 打包资源：icon.ico / icon_ui.png / ChineseSimplified.isl 共约 145 KB，
+# 另有一个由 build.py 自动从 imageio-ffmpeg 生成的 ffmpeg.exe（约 88 MB）
+build_assets/
+# 图标生成中间产物
+vibe_images/
+
+# ---------- 运行时产物 ----------
+*.log
+*.mp4
+*.pptx
+*.docx
+*.srt
+*.vtt
+
+# ---------- 编辑器 / 操作系统 ----------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+Thumbs.db
+desktop.ini
+
+# ---------- 密钥 / 本地配置（务必不要提交）----------
+.env
+.env.*
+config.json
+*.key
+*.pem
