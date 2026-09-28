@@ -36,9 +36,13 @@ kouboback/
 Test1/
 # 测试输出（335 MB）
 test_out/
-# 打包资源：icon.ico / icon_ui.png / ChineseSimplified.isl 共约 145 KB，
-# 另有一个由 build.py 自动从 imageio-ffmpeg 生成的 ffmpeg.exe（约 88 MB）
-build_assets/
+# 打包资源：只保留构建必需的 3 个小文件（icon.ico / icon_ui.png /
+# ChineseSimplified.isl，合计约 145 KB，build.py 与 installer.iss 硬依赖）；
+# 其余一律排除——尤其 ffmpeg.exe（约 88 MB，由 build.py 自动从 imageio-ffmpeg 生成）
+build_assets/*
+!build_assets/icon.ico
+!build_assets/icon_ui.png
+!build_assets/ChineseSimplified.isl
 # 图标生成中间产物
 vibe_images/
 
@@ -65,3 +69,6 @@ desktop.ini
 config.json
 *.key
 *.pem
+
+# ---------- 本地工具数据（AI 助手工作记忆等，非项目内容）----------
+.workbuddy/

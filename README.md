@@ -11,10 +11,29 @@
 
 ## 下载安装
 
-把 `dist/KouboPPT_Setup_v0.4.0.exe` 发给别人，双击 → 一路"下一步"装好（可勾选桌面图标），装完从桌面/开始菜单启动，控制面板里可卸载。**安装不需要管理员权限、不弹 UAC**，默认装到 `%LOCALAPPDATA%\Programs\KouboPPT`。
+### 方式一：下载安装包（推荐）
+
+到 **[Releases](https://github.com/landawangnb666/KouboPPT/releases)** 页面下载最新的 `KouboPPT_Setup_v0.4.0.exe`，双击 → 一路"下一步"装好（可勾选桌面图标），装完从桌面/开始菜单启动，控制面板里可卸载。**安装不需要管理员权限、不弹 UAC**，默认装到 `%LOCALAPPDATA%\Programs\KouboPPT`。
 
 - 首次运行 Windows 可能提示"已保护你的电脑"——没有代码签名证书的软件都会这样，点"更多信息 → 仍要运行"即可
-- 不想安装的人，也可以直接用 `dist\KouboPPT\KouboPPT.exe`（目录版，免安装、双击即用）
+- 不想安装的人，可以下载 Releases 里的目录版压缩包，解压后直接双击 `KouboPPT.exe`（免安装，双击即用）
+
+> **本仓库只托管源码**，不含 `dist/` 下的打包产物（安装包单个约 95 MB，超出常规仓库托管范围）。
+> 若 Releases 页面暂时还没有安装包，按下文「[给开发者](#给开发者)」一节自行构建即可。
+
+### 方式二：从源码运行
+
+需要 Python 3.10 或更高（开发环境为 3.14）：
+
+```bash
+git clone https://github.com/landawangnb666/KouboPPT.git
+cd KouboPPT
+python -m venv .venv
+.venv/Scripts/pip install -r requirements.txt
+.venv/Scripts/python.exe run.py
+```
+
+源码运行同样需要本机装有 Microsoft PowerPoint 或 WPS 演示。
 
 **使用环境要求（使用者的电脑）：**
 
@@ -203,6 +222,10 @@ python -m venv .venv
 # 没装 Inno Setup 时会跳过安装包，只出目录版
 ```
 
+> **关于打包资源**：`build_assets/` 下的 `icon.ico`、`icon_ui.png`、`ChineseSimplified.isl` 是构建必需的源码级资源（合计约 145 KB），已随仓库提交；其中的 `ffmpeg.exe`（约 88 MB）由 `build.py` 打包时自动从 `imageio-ffmpeg` 复制生成，**不在仓库中**，无需手动准备。
+>
+> **关于打包产物**：`dist/`（含安装包）与中间目录 `build/` 已在 `.gitignore` 中排除，请勿提交；安装包请通过 GitHub Releases 分发。
+
 ### 接入新的 TTS 引擎
 
 实现 `kouboppt/tts/base.py` 的 `TTSProvider`（只需一个 `synthesize(text, voice, rate, out_path)` 方法），在 `tts/__init__.py` import 一下即可出现在界面供应商下拉框里，流水线无需改动。
@@ -235,3 +258,14 @@ python -m venv .venv
 - **换风格不会重做已有课件**：课件与口播稿齐了就算缓存（风格只在生成那一刻生效）。想让已经生成的课换风格，删掉 `PPT/` 里对应课件和该节的 `口播稿.txt` 后重跑；"自动"模式想重新选风格，删掉书目录下的 `PPT风格.json`
 - AI 生成的内容建议人工过一遍：口播稿、题库解析都是草稿级质量，PPT 生成后可在 PowerPoint 里微调再出视频
 - 每节时长由内容页数与讲稿字数共同决定；生成时会提示预计时长，偏差大时可在 PPT 里增删页后重出视频
+
+## 许可证
+
+本项目采用 [MIT License](LICENSE) 开源，可自由使用、修改、分发（含商业用途），仅需保留版权声明。
+
+## 致谢
+
+- [Inno Setup](https://jrsoftware.org/isinfo.php) — 安装包构建工具
+- [Inno-Setup-Chinese-Simplified-Translation](https://github.com/kira-96/Inno-Setup-Chinese-Simplified-Translation) — 中文安装界面语言文件
+- [imageio-ffmpeg](https://github.com/imageio/imageio-ffmpeg) — 随包分发的 ffmpeg 二进制
+- [customtkinter](https://github.com/TomSchimansky/CustomTkinter) — 现代化 Tkinter 组件库

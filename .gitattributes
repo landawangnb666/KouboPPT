@@ -15,6 +15,7 @@
 *.cmd   text eol=crlf
 *.ps1   text eol=crlf
 *.iss   text eol=crlf
+*.isl   text eol=crlf
 
 # 二进制：不做任何转换
 *.exe   binary
