@@ -89,10 +89,76 @@ def _norm_secs(secs: list[Chapter], a: int, b: int) -> list[Chapter]:
     return out
 
 
-def chapters_from_bookmarks(doc: fitz.Document) -> list[Chapter]:
-    """一级书签 → 章节页码范围，二级书签 → 章内小节。书签太少或无页码则返回 []。"""
-    entries = [(lv, t.strip(), p) for lv, t, p in doc.get_toc(simple=True)
-               if lv <= 2 and p > 0 and re.search(r"[\w\u4e00-\u9fff]", t.strip())]
+# 纯页码式标题：'1'、'12'、'第 3 页'、'Page 5'、'p12'、'IV'（罗马数字）。
+_BOOKMARK_PAGE_RE = re.compile(
+    r"^(?:第\s*[0-9ivxlcdm]+\s*页|p(?:age)?\.?\s*[0-9]+|[0-9]+|[ivxlcdm]+)$",
+    re.IGNORECASE)
+
+
+def _is_meaningful_bookmark_title(title: str) -> bool:
+    """书签标题是否有章节含义：含汉字/英文字母，且不是"纯页码式"标题。
+
+    扫描工具（FreePic2Pdf 等）常给每一页自动塞一条标题就是页码的书签
+    （'1'、'2'、'第3页'、'Page 5'、'IV'），这些都不是章节名，
+    旧实现用 \\w 匹配会连数字一起放行，从而把垃圾书签误判为有效目录。
+    """
+    s = (title or "").strip()
+    if not s:
+        return False
+    if _BOOKMARK_PAGE_RE.match(s):
+        return False
+    return bool(re.search(r"[A-Za-z\u4e00-\u9fff]", s))
+
+
+def _bookmarks_usable(entries, total: int) -> tuple[bool, str]:
+    """书签是否像"真章节书签"。返回 (是否可用, 不可用原因)。
+
+    两类垃圾书签会被判死（任一命中）：
+    ① 标题大多是页码：有效标题占比 < 40%；
+    ② 疑似逐页页码书签：书签数 ≥ 页数、清一色一级、且平均每 1~2 页一条。
+    命中即让 chapters_from_bookmarks 返回 []，由上层回退「AI 看目录」。
+    判定只针对这本 PDF 自己的书签，阈值保守（正常人一律走原书签路径）。
+    """
+    n = len(entries)
+    if n == 0:
+        return False, "没有书签"
+    good = sum(1 for _, t, _ in entries if _is_meaningful_bookmark_title(t))
+    if good / n < 0.4:
+        return False, f"书签标题多为页码（{n - good}/{n} 条不是章节名）"
+    if total > 0 and n >= total:                      # 书签不少于页数 = 疑似每页一条
+        if not any(lv >= 2 for lv, _, _ in entries):  # 真目录通常有章/节两级
+            pages = sorted({p for _, _, p in entries})
+            gaps = [pages[i + 1] - pages[i] for i in range(len(pages) - 1)]
+            avg = sum(gaps) / len(gaps) if gaps else 0.0
+            if avg <= 1.2:
+                return False, (f"书签过密（{n} 条 / {total} 页，平均每 {avg:.1f} 页一条），"
+                               "疑似逐页页码书签")
+    return True, ""
+
+
+def _looks_degenerate(chapters: list["Chapter"], total: int) -> bool:
+    """「书签」来源的章节结构是否明显退化：整本塌成不到 2 章（且书不短）。
+
+    好书签至少能分出 2 章；归一化后只剩 1 章，基本是逐页页码/坏书签被丢弃后
+    残留下来的（如《戏剧艺术概论》塌成 1 章"封底"覆盖全书）。对很短的文档不做
+    此判定，避免误伤；只用于书签来源，AI/手工来源一律信任。
+    """
+    return total >= 30 and len(chapters) < 2
+
+
+def chapters_from_bookmarks(doc: fitz.Document, log=None) -> list[Chapter]:
+    """一级书签 → 章节页码范围，二级书签 → 章内小节。
+
+    书签太少、无页码或明显是"逐页页码书签"时返回 []，让上层回退 AI 看目录。
+    """
+    raw = [(lv, t.strip(), p) for lv, t, p in doc.get_toc(simple=True) if p > 0]
+    usable, reason = _bookmarks_usable(raw, doc.page_count)
+    if not usable:
+        if log is not None:
+            log(f"  ⚠ {reason}，跳过书签，改让 AI 看目录推断章节")
+        return []
+    entries = [(lv, t, p) for lv, t, p in raw
+               if lv <= 2 and _is_meaningful_bookmark_title(t)]
     tops = [(t, p) for lv, t, p in entries if lv == 1]
     if len(tops) < 2:
         return []
@@ -562,12 +628,19 @@ def load_chapter_structure(book_dir: Path, total: int, log=None
         if log is not None:
             log(f"  ⚠ 归一化后没有任何可用章节（各章都不足 {MIN_CHAPTER_PAGES} 页？）")
         return None
+    src = str((data.get("source") if isinstance(data, dict) else None) or "manual")
+    # 缓存自愈：早期"逐页页码书签"被误用后落盘的退化结构，不该一直被沿用，
+    # 否则用户永远走不到重新识别。只否决 bookmarks 来源；AI/手工一律信任。
+    if src == "bookmarks" and _looks_degenerate(norm, total):
+        if log is not None:
+            log(f"  ⚠ {CHAPTERS_FILE} 来源为书签且结果退化（归一化后只剩 {len(norm)} 章），"
+                "已忽略并重新识别")
+        return None
     if log is not None:
         if norm[0].start > 1:
             log(f"  第 1-{norm[0].start - 1} 页（封面/目录等）不在任何章节内，跳过")
-        src = data.get("source") if isinstance(data, dict) else None
-        log(f"  沿用 {CHAPTERS_FILE}（{len(norm)} 章，来源 {src or 'manual'}；删掉它可重新识别）")
-    return norm, str((data.get("source") if isinstance(data, dict) else None) or "manual")
+        log(f"  沿用 {CHAPTERS_FILE}（{len(norm)} 章，来源 {src}；删掉它可重新识别）")
+    return norm, src
 
 
 def ensure_chapter_structure(llm, doc: fitz.Document, book_dir: Path, tmpdir: Path,
@@ -577,12 +650,21 @@ def ensure_chapter_structure(llm, doc: fitz.Document, book_dir: Path, tmpdir: Pa
     loaded = load_chapter_structure(book_dir, total, log)
     if loaded is not None:
         return loaded
-    chapters = chapters_from_bookmarks(doc)
+    chapters = chapters_from_bookmarks(doc, log)
     source = "bookmarks"
     if chapters:
-        log(f"  从 PDF 书签识别出 {len(chapters)} 章")
-    else:
-        log("  书签为空，让 AI 看前 20 页目录推断章节（低清缩图，超时会自动换更小的请求）…")
+        # 书签质量校验之后再加一道"结果合理性"校验：好书签不会整本塌成 1 章。
+        probe = normalize_chapters(
+            [Chapter(c.title, c.start, c.end, list(c.sections)) for c in chapters],
+            total, log=None)
+        if _looks_degenerate(probe, total):
+            log(f"  ⚠ 书签识别结果退化（归一化后只剩 {len(probe)} 章覆盖全书），"
+                "视为无效书签，改让 AI 看目录…")
+            chapters = []
+        else:
+            log(f"  从 PDF 书签识别出 {len(chapters)} 章")
+    if not chapters:
+        log("  让 AI 看前 20 页目录推断章节（低清缩图，超时会自动换更小的请求）…")
         chapters = detect_chapters_llm(llm, doc, tmpdir, log, raw_dir=book_dir)
         source = "ai"
     if not chapters:

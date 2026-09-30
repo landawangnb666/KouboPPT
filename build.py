@@ -5,6 +5,9 @@
 - dist/KouboPPT_Setup_v<版本>.exe  安装包（双击安装：开始菜单/桌面快捷方式 + 卸载）
 
 用法: .venv/Scripts/python.exe build.py
+
+注意：`--collect-all tkinterdnd2` 是必须的——拖拽导入依赖它自带的 tkdnd
+二进制（win-x64/libtkdnd*.dll）与配套 .tcl 脚本，缺了打包后拖拽会静默失效。
 """
 import atexit
 import os
@@ -88,6 +91,7 @@ def main():
         "--icon", str(ASSETS / "icon.ico"),
         "--collect-all", "customtkinter",
         "--collect-all", "edge_tts",
+        "--collect-all", "tkinterdnd2",
         "--collect-data", "matplotlib",
         "--collect-data", "docx",
         "--collect-submodules", "pymupdf",

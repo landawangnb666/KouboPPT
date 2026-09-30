@@ -434,6 +434,65 @@ assert tb.normalize_chapters(scc, 50) == [
 shutil.rmtree(norm_dir)
 print("章节归一化幂等 OK（save→load 往返一致，首次=重跑，缝隙统一并入前章）")
 
+# ---------------- 书签质量：逐页页码书签不得被误当成章节书签 ----------------
+# 扫描件（FreePic2Pdf 等）会给每一页塞一条"标题就是页码"的书签；旧实现把它当有效
+# 目录，导致「AI 看目录」兜底被跳过、整本塌成一章（《戏剧艺术概论》即如此）。
+jdoc = fitz.open()
+for _ in range(60):
+    jdoc.new_page()
+jdoc.set_toc([[1, "封面", 1], [1, "目录", 2]] + [[1, str(i), i] for i in range(3, 61)])
+assert tb.chapters_from_bookmarks(jdoc) == [], "逐页页码书签应被判无效并返回空"
+jdoc.close()
+
+# "有名字但都指向 p1"的坏书签：标题质量过关，但归一化后塌成 1 章，仍要否决
+assert tb._looks_degenerate([tb.Chapter("封底", 1, 290)], 290) is True
+assert tb._looks_degenerate([tb.Chapter("第1章", 1, 20), tb.Chapter("第2章", 21, 40)],
+                            290) is False
+assert tb._looks_degenerate([tb.Chapter("唯一章", 1, 5)], 5) is False       # 短文档不判
+
+# 退化缓存自愈：bookmarks 来源且塌成 1 章 → 忽略（返回 None）；手工来源信任
+degen_dir = OUT / "_degen_cache_test"
+if degen_dir.exists():
+    shutil.rmtree(degen_dir)
+degen_dir.mkdir()
+tb.save_chapter_structure(degen_dir, [tb.Chapter("封底", 1, 200)], "bookmarks", 200)
+assert tb.load_chapter_structure(degen_dir, 200) is None, "退化的书签缓存应被忽略"
+tb.save_chapter_structure(degen_dir, [tb.Chapter("唯一章", 1, 200)], "manual", 200)
+assert tb.load_chapter_structure(degen_dir, 200) is not None, "手工来源缓存应被信任"
+shutil.rmtree(degen_dir)
+print("书签质量 OK（逐页页码书签被否决、正常书签不受影响、退化缓存自愈）")
+
+# ensure：坏书签 → 自动回退 AI 看目录
+class _StubTOC:
+    def __init__(self):
+        self.n = 0
+
+    def chat_json(self, *a, **k):
+        self.n += 1
+        return {"chapters": [{"title": "第1章", "start": 1, "end": 30},
+                             {"title": "第2章", "start": 31, "end": 60}]}
+
+    def chat(self, *a, **k):
+        return ""
+
+tdoc = fitz.open()
+for _ in range(60):
+    tdoc.new_page()
+tdoc.set_toc([[1, "封面", 1], [1, "书名", 1], [1, "版权", 1], [1, "封底", 1]])
+ensure_dir = OUT / "_ensure_fallback_test"
+if ensure_dir.exists():
+    shutil.rmtree(ensure_dir)
+ensure_dir.mkdir()
+stub_toc = _StubTOC()
+ech, esrc = tb.ensure_chapter_structure(stub_toc, tdoc, ensure_dir,
+                                        OUT / "_ensure_fallback_tmp", log=lambda s: None)
+assert esrc == "ai" and stub_toc.n == 1, (esrc, stub_toc.n)
+assert len(ech) == 2, ech
+tdoc.close()
+shutil.rmtree(ensure_dir, ignore_errors=True)
+shutil.rmtree(OUT / "_ensure_fallback_tmp", ignore_errors=True)
+print("ensure 回退 OK（坏书签 → AI 看目录，不再塌成一章）")
+
 # ---------------- 课后习题切分纯函数 ----------------
 md_lines = [
     "# 第1章 绪论",

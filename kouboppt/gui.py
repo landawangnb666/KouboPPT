@@ -27,6 +27,32 @@ from . import theme as T
 from .llm import LLMClient, LLMConfig
 from .tts import get_provider, provider_names
 
+# 拖拽导入：tkinterdnd2 把 tkdnd 的 Tcl 扩展挂到 Tk 上。它是可选依赖——
+# 缺了/加载失败就让程序照常跑，只是没有拖拽，其余功能一切照旧（见 _enable_dnd）。
+try:
+    from tkinterdnd2 import TkinterDnD, DND_FILES
+except Exception:                      # noqa: BLE001  没装或 .dll 加载不了都走这里
+    TkinterDnD = None                  # type: ignore[assignment]
+    DND_FILES = None                   # type: ignore[assignment]
+
+
+if TkinterDnD is not None:
+    class _AppBase(ctk.CTk, TkinterDnD.DnDWrapper):
+        """CTk + 拖拽。customtkinter 自己也是 Tk 的子类，两个基类可以并存；
+        DnDWrapper 只提供 drop_target_register 等方法，必须在窗口初始化后
+        _require 一次才算真正启用。"""
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.TkdndVersion = None
+            try:
+                self.TkdndVersion = TkinterDnD._require(self)
+            except Exception:          # noqa: BLE001  tkdnd dll 加载失败：退化为无拖拽
+                self.TkdndVersion = None
+else:
+    _AppBase = ctk.CTk
+
+
 CONFIG_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "KouboPPT"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
@@ -81,7 +107,47 @@ def _asset(name: str) -> Path | None:
     return next((c for c in cands if c and c.exists()), None)
 
 
-class App(ctk.CTk):
+def split_drop_paths(data: str) -> list[str]:
+    """把拖拽事件的 Tcl 列表拆成路径列表。
+
+    形如 `{C:/a b/1.pdf} C:/c/2.pdf`：带空格的路径被花括号包住，所以不能简单
+    按空格切。tkinterdnd2 自带的 tk.splitlist 在部分版本上没有，这里自己解析兜底。
+    """
+    out: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    for ch in data or "":
+        if ch == "{":
+            depth += 1
+            if depth == 1:
+                continue
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                continue
+        elif ch.isspace() and depth == 0:
+            if buf:
+                out.append("".join(buf))
+                buf = []
+            continue
+        buf.append(ch)
+    if buf:
+        out.append("".join(buf))
+    return out
+
+
+def _load_pdf_queue(cfg: dict) -> list[str]:
+    """读教材队列。新键 cw_pdfs（列表）优先；老配置里的 cw_pdf（单个路径字符串）自动迁移。"""
+    q = cfg.get("cw_pdfs")
+    if isinstance(q, list):
+        return [str(p) for p in q if str(p).strip()]
+    old = cfg.get("cw_pdf")
+    if isinstance(old, str) and old.strip():
+        return [old.strip()]
+    return []
+
+
+class App(_AppBase):
     AUTO_SELCHECK = True      # 自动化测试置 False：别让每次跑测试都真编一遍
 
     def __init__(self):
@@ -103,6 +169,8 @@ class App(ctk.CTk):
 
         self.cfg = load_config()
         self.files: list[str] = list(self.cfg.get("files", []))
+        # 教材队列：按列表顺序逐本跑。兼容旧配置里单个字符串的 cw_pdf。
+        self.pdfs: list[str] = _load_pdf_queue(self.cfg)
         self.worker: threading.Thread | None = None
         self.cancel_event = threading.Event()
         self.msg_queue: queue.Queue = queue.Queue()
@@ -118,6 +186,7 @@ class App(ctk.CTk):
         self._log_lock = threading.Lock()       # 工作线程也会写文件，必须加锁
         self._warn_count = 0
         self._log_tall = False
+        self._dnd_ok = bool(getattr(self, "TkdndVersion", None))   # tkdnd 真的加载成功才算
         video.set_selfcheck(self.cfg.get("enc_selfcheck"))
 
         self._build_header()
@@ -203,6 +272,22 @@ class App(ctk.CTk):
         area.pack(fill="both", expand=True)
         return area
 
+    def _enable_dnd(self, widget, on_paths, hint_widget=None, hint_text=""):
+        """给一个控件挂上"拖文件进来"的能力；不可用时静默跳过（功能降级）。
+
+        on_paths 收到的是拖入的路径列表，由调用方决定怎么用（追加到队列等）。
+        """
+        if not self._dnd_ok:
+            return False
+        try:
+            widget.drop_target_register(DND_FILES)
+            widget.dnd_bind("<<Drop>>", lambda e: on_paths(split_drop_paths(e.data)))
+        except Exception:          # noqa: BLE001  个别控件类型不支持注册，不影响使用
+            return False
+        if hint_widget is not None and hint_text:
+            hint_widget.configure(text=hint_text)
+        return True
+
     # ---------------- 标签页 1：原有 PPT→视频 ----------------
     def _build_video_tab(self, root):
         run_frame = ctk.CTkFrame(root, fg_color="transparent")
@@ -240,6 +325,10 @@ class App(ctk.CTk):
                  command=self._add_files).pack(pady=(0, 6))
         T.button(btns, "移除所选", width=112, command=self._remove_files).pack(pady=(0, 6))
         T.button(btns, "清空列表", width=112, command=self._clear_files).pack()
+
+        # 拖拽：PPT 和教材两个页签的列表都能收拖进来的文件
+        self._enable_dnd(self.file_list, self._drop_files)
+        self._enable_dnd(list_wrap, self._drop_files)
 
         card2 = T.Card(root, "输出设置", step=2)
         card2.pack(fill="x")
@@ -346,10 +435,48 @@ class App(ctk.CTk):
         g2 = card2.body
         g2.columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(g2, text="扫描版 PDF：", font=T.FONT_BODY).grid(row=0, column=0, sticky="w", pady=4)
-        self.pdf_entry = T.entry(g2, placeholder_text="选择教材 PDF（扫描版或文字版均可）")
-        self.pdf_entry.grid(row=0, column=1, sticky="ew", pady=4)
-        T.button(g2, "浏览", width=72, command=self._pick_pdf).grid(row=0, column=2, padx=(10, 0), pady=4)
+        ctk.CTkLabel(g2, text="教材 PDF：", font=T.FONT_BODY).grid(row=0, column=0,
+                                                              sticky="nw", pady=4)
+        pdf_box = ctk.CTkFrame(g2, fg_color="transparent")
+        pdf_box.grid(row=0, column=1, columnspan=2, sticky="ew", pady=4)
+        pdf_box.columnconfigure(0, weight=1)
+
+        self.pdf_count_label = ctk.CTkLabel(pdf_box, text="", font=T.FONT_SMALL,
+                                            text_color=T.FAINT, anchor="w")
+        self.pdf_count_label.grid(row=0, column=0, sticky="w", pady=(0, 2))
+        self.pdf_hint = ctk.CTkLabel(pdf_box, text="", font=T.FONT_SMALL,
+                                     text_color=T.FAINT, anchor="e")
+        self.pdf_hint.grid(row=0, column=0, sticky="e", pady=(0, 2))
+
+        # 队列列表框：顺序就是跑的顺序，用户看得见、也能调
+        list_row = ctk.CTkFrame(pdf_box, fg_color="transparent")
+        list_row.grid(row=1, column=0, sticky="ew")
+        list_wrap = ctk.CTkFrame(list_row, fg_color=T.SOFT, corner_radius=8,
+                                 border_width=1, border_color=T.FIELD_BORDER)
+        list_wrap.pack(side="left", fill="both", expand=True)
+        self.pdf_list = Listbox(list_wrap, selectmode=EXTENDED, height=4,
+                                font=T.FONT_BODY, activestyle="none",
+                                bg=T.SOFT, fg=T.TEXT, bd=0, highlightthickness=0,
+                                selectbackground=T.PRIMARY_SOFT,
+                                selectforeground=T.PRIMARY)
+        pdf_scroll = ctk.CTkScrollbar(list_wrap, command=self.pdf_list.yview,
+                                      button_color="#C9D4E4", button_hover_color=T.FAINT)
+        self.pdf_list.configure(yscrollcommand=pdf_scroll.set)
+        self.pdf_list.pack(side="left", fill="both", expand=True, padx=8, pady=8)
+        pdf_scroll.pack(side="right", fill="y", pady=8, padx=(0, 6))
+
+        pdf_btns = ctk.CTkFrame(list_row, fg_color="transparent")
+        pdf_btns.pack(side="left", fill="y", padx=(10, 0))
+        T.button(pdf_btns, "添加 PDF", kind="primary", width=112,
+                 command=self._add_pdfs).pack(pady=(0, 6))
+        T.button(pdf_btns, "移除所选", width=112,
+                 command=self._remove_pdfs).pack(pady=(0, 6))
+        T.button(pdf_btns, "清空列表", width=112, command=self._clear_pdfs).pack(pady=(0, 6))
+        order_row = ctk.CTkFrame(pdf_btns, fg_color="transparent")
+        order_row.pack()
+        T.button(order_row, "↑ 上移", width=52, command=lambda: self._move_pdf(-1)).pack(side="left")
+        T.button(order_row, "↓ 下移", width=52, command=lambda: self._move_pdf(1)).pack(side="left",
+                                                                                       padx=(8, 0))
 
         ctk.CTkLabel(g2, text="输出目录：", font=T.FONT_BODY).grid(row=1, column=0, sticky="w", pady=4)
         self.cw_out = T.entry(g2, placeholder_text="留空 = 和 PDF 同目录")
@@ -461,6 +588,12 @@ class App(ctk.CTk):
                "删掉对应文件才能强制重做那一步（旧结构的产物第一次重跑会自动搬进新文件夹）。")
         T.note_card(g2, tip).grid(row=9, column=0, columnspan=3, sticky="ew", pady=(10, 0))
 
+        # 拖拽：贴在列表框和它外框上，拖 PDF 进去就是"追加到队列末尾"
+        hint = "可拖拽 PDF 到列表 —— 按列表顺序逐本跑"
+        self._enable_dnd(self.pdf_list, self._drop_pdfs,
+                         self.pdf_hint if self._dnd_ok else None, hint)
+        self._enable_dnd(list_wrap, self._drop_pdfs)   # 拖到列表外框（空白区）也算
+
     # ---------------- 底部共享：进度 + 日志 ----------------
     def _build_bottom(self):
         run_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -536,6 +669,7 @@ class App(ctk.CTk):
         self.ai_url.insert(0, c.get("ai_base_url", ""))
         self.ai_key.insert(0, c.get("ai_key", ""))
         self.ai_model.insert(0, c.get("ai_model", ""))
+        self._refresh_pdf_list()          # 队列来自 __init__ 里读的 self.pdfs
         self.cw_out.insert(0, c.get("cw_out", ""))
         self.cw_split_var.set(c.get("cw_split_mode", "pages"))
         self.cw_start.insert(0, str(c.get("cw_start_page", 1)))
@@ -574,6 +708,26 @@ class App(ctk.CTk):
                 self.file_list.insert(END, p)
         self._update_file_count()
 
+    def _drop_files(self, paths):
+        """拖拽回调（PPT 页签）：把 .ppt/.pptx 追加到列表，其余忽略。"""
+        added, skipped = 0, 0
+        for raw in paths or []:
+            p = str(raw).strip().strip('"')
+            if not p:
+                continue
+            if not p.lower().endswith((".ppt", ".pptx")):
+                skipped += 1
+                continue
+            if p not in self.files:
+                self.files.append(p)
+                self.file_list.insert(END, p)
+                added += 1
+        self._update_file_count()
+        if skipped:
+            self._append_log(f"已忽略 {skipped} 个非 PPT 文件（只收 .pptx / .ppt）")
+        if added:
+            self._append_log(f"已拖入 {added} 个 PPT（共 {len(self.files)} 个）")
+
     def _remove_files(self):
         for idx in reversed(self.file_list.curselection()):
             self.file_list.delete(idx)
@@ -595,12 +749,86 @@ class App(ctk.CTk):
             self.out_entry.delete(0, END)
             self.out_entry.insert(0, d)
 
-    def _pick_pdf(self):
-        p = filedialog.askopenfilename(
-            title="选择教材 PDF", filetypes=[("PDF 文档", "*.pdf"), ("所有文件", "*.*")])
-        if p:
-            self.pdf_entry.delete(0, END)
-            self.pdf_entry.insert(0, p)
+    # ------------------------------------------- 教材队列（顺序即执行顺序）
+    def _refresh_pdf_list(self):
+        """把 self.pdfs 重新画到列表框：带序号，一眼看出跑的顺序。"""
+        sel = self._selected_pdf_indices()
+        self.pdf_list.delete(0, END)
+        for i, p in enumerate(self.pdfs, 1):
+            self.pdf_list.insert(END, f"{i}. {p}")
+        for i in sel:
+            if i < len(self.pdfs):
+                self.pdf_list.selection_set(i)
+        n = len(self.pdfs)
+        self.pdf_count_label.configure(
+            text=f"本次将按顺序跑 {n} 本教材" if n else "尚未添加教材 PDF")
+        self.pdf_list.configure(state="normal")
+
+    def _selected_pdf_indices(self) -> list[int]:
+        try:
+            return list(self.pdf_list.curselection())
+        except Exception:          # noqa: BLE001  刷新过程中控件可能已销毁
+            return []
+
+    def _add_pdfs(self, paths=None):
+        """追加 PDF 到队列末尾（去重、只收存在的 .pdf）。返回真正加进去的条数。"""
+        if paths is None:
+            paths = filedialog.askopenfilenames(
+                title="选择教材 PDF（可多选）",
+                filetypes=[("PDF 文档", "*.pdf"), ("所有文件", "*.*")])
+        added, skipped = 0, []
+        for raw in paths or []:
+            p = str(raw).strip().strip('"')
+            if not p:
+                continue
+            if not p.lower().endswith(".pdf"):
+                skipped.append(p)
+                continue
+            if p in self.pdfs:
+                continue
+            self.pdfs.append(p)
+            added += 1
+        self._refresh_pdf_list()
+        if skipped:
+            self._append_log(f"已忽略 {len(skipped)} 个非 PDF 文件：" +
+                             "、".join(Path(s).name for s in skipped[:3]) +
+                             ("…" if len(skipped) > 3 else ""))
+        if added:
+            self._append_log(f"已加入教材队列 {added} 本（共 {len(self.pdfs)} 本）")
+        return added
+
+    def _drop_pdfs(self, paths):
+        """拖拽回调：追加到队列。主线程直接调（set，不阻塞）。"""
+        n = self._add_pdfs(paths)
+        if n == 0 and paths:
+            self._append_log("拖入的文件没有可加入的 PDF（重复或非 PDF 已跳过）")
+
+    def _remove_pdfs(self):
+        for idx in reversed(self._selected_pdf_indices()):
+            self.pdfs.pop(idx)
+        self._refresh_pdf_list()
+
+    def _clear_pdfs(self):
+        self.pdfs.clear()
+        self._refresh_pdf_list()
+
+    def _move_pdf(self, delta: int):
+        """把选中的（单个）条目上移/下移一格，用来调整执行顺序。"""
+        sel = self._selected_pdf_indices()
+        if len(sel) != 1:
+            self._append_log("调序请只选中一本")
+            return
+        i = sel[0]
+        j = i + delta
+        if not (0 <= j < len(self.pdfs)):
+            return
+        self.pdfs[i], self.pdfs[j] = self.pdfs[j], self.pdfs[i]
+        self.pdf_list.delete(0, END)
+        for k, p in enumerate(self.pdfs, 1):
+            self.pdf_list.insert(END, f"{k}. {p}")
+        self.pdf_list.selection_clear(0, END)
+        self.pdf_list.selection_set(j)
+        self.pdf_list.see(j)
 
     def _pick_cw_out(self):
         d = filedialog.askdirectory(title="选择输出目录")
@@ -678,10 +906,10 @@ class App(ctk.CTk):
             raise ValueError("请填写 AI 接口地址和模型名")
         return LLMConfig(base_url=url, api_key=self.ai_key.get().strip(), model=model)
 
-    def _collect_courseware(self) -> courseware.Options:
-        pdf = self.pdf_entry.get().strip()
+    def _collect_courseware(self, pdf: str | Path) -> courseware.Options:
+        pdf = str(pdf)
         if not pdf or not Path(pdf).is_file():
-            raise ValueError("请选择教材 PDF 文件")
+            raise ValueError(f"教材 PDF 不存在或已被移动：{pdf}")
         try:
             minutes = float(self.cw_minutes.get().strip() or 35)
             start = int(self.cw_start.get().strip() or 1)
@@ -708,7 +936,8 @@ class App(ctk.CTk):
         except ValueError:
             workers = 4
         workers = max(1, workers)          # 不设上限：挡位只是常用值，想更高自己填
-        out = self.cw_out.get().strip() or str(Path(pdf).parent)
+        # 多本教材时：输出目录留空则每本各自落在自己 PDF 旁边（见 _courseware_out_for）
+        out = self._courseware_out_for(pdf)
         return courseware.Options(
             pdf_path=Path(pdf), out_dir=Path(out),
             split_mode=mode, start_page=start, pages_per_lesson=per,
@@ -720,6 +949,20 @@ class App(ctk.CTk):
             workers=workers,
             video=self._collect_settings(),
         )
+
+    def _courseware_out_for(self, pdf: str) -> str:
+        """这本教材的输出根目录。
+
+        用户填了输出目录就用它；留空时：只有一本 → PDF 同目录（老行为不变），
+        多本 → 统一收进「输出目录/教材课程」，避免多本书的产物全散在各自 PDF 旁边。
+        """
+        out = self.cw_out.get().strip()
+        if out:
+            return out
+        if len(self.pdfs) > 1:
+            base = Path(self.pdfs[0]).parent / "教材课程"
+            return str(base)
+        return str(Path(pdf).parent)
 
     # ------------------------------------------------------------- 运行
     def _busy(self):
@@ -810,26 +1053,39 @@ class App(ctk.CTk):
     def _start_courseware(self):
         if self._busy():
             return
+        if not self.pdfs:
+            messagebox.showwarning("提示", "请先添加教材 PDF")
+            return
         try:
-            opts = self._collect_courseware()
             llm_cfg = self._collect_llm_config()
+            # 逐本预检：路径不存在的直接挑出来，别等跑到一半才发现
+            opts_list = [self._collect_courseware(p) for p in self.pdfs]
         except Exception as exc:
             messagebox.showwarning("参数有误", str(exc))
             return
-        if not (opts.gen_ppt or opts.gen_video or opts.gen_notes or opts.gen_quiz):
+        if not (opts_list[0].gen_ppt or opts_list[0].gen_video
+                or opts_list[0].gen_notes or opts_list[0].gen_quiz):
             messagebox.showwarning("提示", "请至少勾选一种产出内容")
             return
-        plan = courseware.stage_plan(opts)
+
         chosen_step = self.cw_mode_var.get() == "step"
-        step_mode = chosen_step and len(plan) > 1
-        if chosen_step and len(plan) <= 1:
-            self.msg_queue.put(("log", "本次只有 1 个步骤，无需中途确认，直接跑完。"))
-        # 风格询问也按用户选的模式走：全自动零打扰（AI 直接定首推），分步模式才弹候选窗
-        ask_style = chosen_step
+        # 多本教材时强制作业模式：中途弹"要不要继续"会打断整条队列，体验很碎
+        multi = len(opts_list) > 1
+        if multi and chosen_step:
+            self.msg_queue.put(("log", f"队列里有 {len(opts_list)} 本教材，"
+                                       "本次按「全自动」逐本跑完（多本不支持分步确认）。"))
+        step_mode = chosen_step and not multi
+        ask_style = chosen_step and not multi
+        for opts in opts_list:
+            plan = courseware.stage_plan(opts)
+            if step_mode and len(plan) <= 1:
+                self.msg_queue.put(("log", "本次只有 1 个步骤，无需中途确认，直接跑完。"))
+                break
         self._save_now(None)
         llm = LLMClient(llm_cfg, log=lambda s: self.msg_queue.put(("log", s)))
 
-        self._begin_run("教材 → 课程", opts.out_dir)
+        self._begin_run(f"教材 → 课程（{len(opts_list)} 本）"
+                        if len(opts_list) > 1 else "教材 → 课程", opts_list[0].out_dir)
 
         def gate(next_name, done, out_dir):
             """工作线程侧：把确认请求交给主线程弹窗，然后阻塞等用户选择。"""
@@ -846,22 +1102,40 @@ class App(ctk.CTk):
             return bool(holder["ok"])
 
         def work():
-            try:
-                if opts.theme == slidegen.AUTO_STYLE and (opts.gen_ppt or opts.gen_video):
-                    self._cw_pick_style(llm, opts, ask_style)
-                outputs = courseware.run(
-                    llm, opts,
-                    log=lambda s: self.msg_queue.put(("log", s)),
-                    progress=lambda frac, msg: self.msg_queue.put(("progress", frac, msg)),
-                    cancel=self.cancel_event,
-                    gate=gate if step_mode else None)
-                self.msg_queue.put(("done", (len(outputs), 0)))
-            except (courseware.Cancelled, pipeline.Cancelled):
-                self.msg_queue.put(("log", "⛔ 已取消"))
-                self.msg_queue.put(("done", (0, 0)))
-            except Exception as exc:
-                self.msg_queue.put(("log", self._fail_detail(exc)))
-                self.msg_queue.put(("done", (0, 1)))
+            total_books = len(opts_list)
+            ok = 0                                  # 累计产出文件数
+            results: list[tuple[str, int, str]] = []   # (书名, 产出数, 失败原因)
+            cancelled = False
+            for i, opts in enumerate(opts_list, 1):
+                name = Path(opts.pdf_path).name
+                if self.cancel_event.is_set():
+                    cancelled = True
+                    break
+                self.msg_queue.put(("status", f"({i}/{total_books}) {name}"))
+                self.msg_queue.put(("log", f"{LOG_SEP} 教材 {i}/{total_books}：{name} {LOG_SEP}"))
+                try:
+                    if opts.theme == slidegen.AUTO_STYLE and (opts.gen_ppt or opts.gen_video):
+                        self._cw_pick_style(llm, opts, ask_style)
+                    outputs = courseware.run(
+                        llm, opts,
+                        log=lambda s: self.msg_queue.put(("log", s)),
+                        progress=lambda frac, msg, i=i, total_books=total_books:
+                            self.msg_queue.put(("progress", (i - 1 + frac) / total_books, msg)),
+                        cancel=self.cancel_event,
+                        gate=gate if step_mode else None)
+                    ok += len(outputs)
+                    results.append((name, len(outputs), ""))
+                    self.msg_queue.put(("log", f"✔ 第 {i} 本完成：{name}（产出 {len(outputs)} 个文件）"))
+                except (courseware.Cancelled, pipeline.Cancelled):
+                    cancelled = True
+                    self.msg_queue.put(("log", "⛔ 已取消"))
+                    break
+                except Exception as exc:
+                    # 单本失败不拖垮队列：记下原因，继续下一本
+                    self.msg_queue.put(("log", self._fail_detail(exc)))
+                    results.append((name, 0, self._short_error(exc)))
+                    self.msg_queue.put(("log", f"✘ 第 {i} 本失败，继续下一本：{name}"))
+            self.msg_queue.put(("done", (ok, results, cancelled)))
 
         self.worker = threading.Thread(target=work, daemon=True)
         self.worker.start()
@@ -1104,6 +1378,7 @@ class App(ctk.CTk):
             "ai_base_url": self.ai_url.get().strip(),
             "ai_key": self.ai_key.get().strip(),
             "ai_model": self.ai_model.get().strip(),
+            "cw_pdfs": self.pdfs,
             "cw_out": self.cw_out.get().strip(),
             "cw_split_mode": self.cw_split_var.get(),
             "cw_start_page": self.cw_start.get().strip() or 1,
@@ -1147,30 +1422,63 @@ class App(ctk.CTk):
                     self._enc_busy = False
                     self._apply_selfcheck(payload[0], ask=True)
                 elif kind == "done":
-                    ok, fail = payload[0]
-                    self._end_run()
-                    if self.cancel_event.is_set():
-                        self.status_label.configure(text="● 已取消", text_color=T.WARN)
-                        self._append_log(f"已取消（产出 {ok} 个文件）")
-                    elif fail:
-                        self.status_label.configure(text="● 有失败项", text_color=T.ERROR)
-                    else:
-                        self.status_label.configure(text="● 已完成", text_color=T.SUCCESS)
-                    if not self.cancel_event.is_set():
-                        self._append_log(f"全部完成：产出 {ok} 个文件" + (f"，失败 {fail} 项" if fail else ""),
-                                         count_warn=False)
-                        if fail:
-                            messagebox.showwarning("完成（有失败）", f"产出 {ok} 个文件，{fail} 项失败，详见日志。")
-                        elif ok:
-                            messagebox.showinfo("完成", f"完成，共产出 {ok} 个文件！")
-                    self._summarize_warnings()
-                    if self._log_path is not None:
-                        self._append_log(f"日志已保存：{self._log_path}",
-                                         to_file=False, count_warn=False)
-                    self._finish_log_file(ok, fail)
+                    self._handle_done(payload[0])
         except queue.Empty:
             pass
         self.after(80, self._poll)
+
+    def _handle_done(self, result):
+        """收尾。两种载荷：PPT→视频是 (ok, fail)；教材→课程是 (ok, results, cancelled)。"""
+        if len(result) == 3:
+            ok, results, cancelled = result
+            failed = [(n, r) for n, _, r in results if r]
+            self._end_run()
+            if cancelled or self.cancel_event.is_set():
+                self.status_label.configure(text="● 已取消", text_color=T.WARN)
+                self._append_log(f"已取消（成功 {len(results) - len(failed)} 本，产出 {ok} 个文件）")
+            elif failed:
+                self.status_label.configure(text="● 有失败项", text_color=T.ERROR)
+            else:
+                self.status_label.configure(text="● 已完成", text_color=T.SUCCESS)
+            if not (cancelled or self.cancel_event.is_set()):
+                ok_n, fail_n = len(results) - len(failed), len(failed)
+                self._append_log(f"队列跑完：成功 {ok_n} 本 / 失败 {fail_n} 本，"
+                                 f"共产出 {ok} 个文件", count_warn=False)
+                for n, rs in failed:
+                    self._append_log(f"  ✘ {n}：{rs}", tag="warn", count_warn=False)
+                if failed:
+                    lines = "\n".join(f"✘ {n}\n    {rs}" for n, rs in failed)
+                    messagebox.showwarning(
+                        "完成（有失败）",
+                        f"成功 {ok_n} 本 / 失败 {fail_n} 本，共产出 {ok} 个文件。\n\n"
+                        f"失败清单：\n{lines}\n\n详见日志。")
+                elif ok:
+                    messagebox.showinfo("完成", f"{ok_n} 本教材全部完成，共产出 {ok} 个文件！")
+            self._summarize_warnings()
+            if self._log_path is not None:
+                self._append_log(f"日志已保存：{self._log_path}", to_file=False, count_warn=False)
+            self._finish_log_file(ok, len(failed))
+            return
+        ok, fail = result
+        self._end_run()
+        if self.cancel_event.is_set():
+            self.status_label.configure(text="● 已取消", text_color=T.WARN)
+            self._append_log(f"已取消（产出 {ok} 个文件）")
+        elif fail:
+            self.status_label.configure(text="● 有失败项", text_color=T.ERROR)
+        else:
+            self.status_label.configure(text="● 已完成", text_color=T.SUCCESS)
+        if not self.cancel_event.is_set():
+            self._append_log(f"全部完成：产出 {ok} 个文件" + (f"，失败 {fail} 项" if fail else ""),
+                             count_warn=False)
+            if fail:
+                messagebox.showwarning("完成（有失败）", f"产出 {ok} 个文件，{fail} 项失败，详见日志。")
+            elif ok:
+                messagebox.showinfo("完成", f"完成，共产出 {ok} 个文件！")
+        self._summarize_warnings()
+        if self._log_path is not None:
+            self._append_log(f"日志已保存：{self._log_path}", to_file=False, count_warn=False)
+        self._finish_log_file(ok, fail)
 
     # ---------------------------------------------------- PPT 风格（自动模式）
     def _cw_pick_style(self, llm, opts, ask: bool = True):
@@ -1437,6 +1745,17 @@ class App(ctk.CTk):
         msg = f"{type(exc).__name__}: {head}" if head else type(exc).__name__
         note = "（详细堆栈见日志文件）" if self._log_active else ""
         return f"{prefix}：{msg[:300]}{note}"
+
+    @staticmethod
+    def _short_error(exc: BaseException) -> str:
+        """给队列汇总用的一句话原因（不带堆栈提示，弹窗里读着清爽）。"""
+        lines = str(exc).strip().splitlines()
+        head = lines[0] if lines else ""
+        if not head:
+            return type(exc).__name__
+        if isinstance(exc, (ValueError, RuntimeError, FileNotFoundError, PermissionError)):
+            return head[:200]                     # 这类异常的消息本身就是人话
+        return f"{type(exc).__name__}: {head[:200]}"
 
     def _summarize_warnings(self) -> None:
         """结束时给一句汇总，免得用户不知道上面有没有漏看警告。"""

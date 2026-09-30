@@ -1,11 +1,11 @@
 ; KouboPPT 安装包脚本（Inno Setup 6）
 ; 正常从 build.py 调用（会自动带上版本号）：
-;   ISCC /DAppVersion=0.4.0 installer.iss
+;   ISCC /DAppVersion=1.0.0 installer.iss
 ; 用 Inno Setup 图标界面手动编译也可以，版本号取下面的默认值。
 
 #define AppName "口播PPT KouboPPT"
 #ifndef AppVersion
-  #define AppVersion "0.4.0"
+  #define AppVersion "1.0.0"
 #endif
 
 [Setup]

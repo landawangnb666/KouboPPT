@@ -67,7 +67,10 @@ state = {"phase": 0, "t0": time.time()}
 
 
 def set_form(pdf: Path, out: Path):
-    for entry, val in ((app.pdf_entry, str(pdf)), (app.cw_out, str(out)),
+    # 教材队列：直接灌进 app.pdfs 再刷新列表（等价于浏览/拖拽导入）
+    app.pdfs[:] = [str(pdf)]
+    app._refresh_pdf_list()
+    for entry, val in ((app.cw_out, str(out)),
                        (app.ai_url, "https://example.invalid/v1"),
                        (app.ai_model, "stub-model"),
                        (app.ai_key, "sk-stub")):
@@ -89,7 +92,7 @@ def check_workers_entry():
     """请求并发不设上限：挡位只是常用值，手输更大的数字也认；0/非数字有兜底。"""
     for val, want in (("24", 24), ("8", 8), ("1", 1), ("0", 1), ("abc", 4), (" 16 ", 16)):
         app.cw_workers.set(val)
-        got = app._collect_courseware().workers
+        got = app._collect_courseware(app.pdfs[0]).workers
         assert got == want, f"并发输入 {val!r} → {got}，应为 {want}"
     app.cw_workers.set("4")
     print(" ✔ 并发数不设上限（24 等更大值可手输；0→1、非数字→4）", flush=True)
@@ -120,20 +123,20 @@ def check_quiz_count():
         app.cw_quizn.set(val)
         app._on_quizn_change()
         assert app.cw_quizn_custom.winfo_manager() != "pack", "选挡位时不该有自定义输入框"
-        assert app._collect_courseware().quiz_count == int(val)
+        assert app._collect_courseware(app.pdfs[0]).quiz_count == int(val)
 
     app.cw_quizn.set(gui.QUIZ_CUSTOM)
     app._on_quizn_change()
     assert app.cw_quizn_custom.winfo_manager() == "pack", "选「自定义…」应放出输入框"
     app.cw_quizn_custom.delete(0, "end")
     app.cw_quizn_custom.insert(0, "42")
-    assert app._collect_courseware().quiz_count == 42
+    assert app._collect_courseware(app.pdfs[0]).quiz_count == 42
     assert app._collect_config()["cw_quiz_count"] == 42
 
     app.cw_quizn_custom.delete(0, "end")
     app.cw_quizn_custom.insert(0, "abc")
     try:
-        app._collect_courseware()
+        app._collect_courseware(app.pdfs[0])
         raise AssertionError("题量填 abc 应报错")
     except ValueError as exc:
         assert "题量" in str(exc), exc
@@ -143,7 +146,7 @@ def check_quiz_count():
     app._on_quizn_change()
     app.cw_quizn_custom.delete(0, "end")
     assert app.cw_quizn_custom.winfo_manager() != "pack", "切回挡位应收回输入框"
-    assert app._collect_courseware().quiz_count == 15
+    assert app._collect_courseware(app.pdfs[0]).quiz_count == 15
     print(" ✔ 题量下拉（5/10/15/20/30 挡位；选「自定义…」出现输入框，填 42 生效；"
           "非法输入报错、存配置兜底 15）", flush=True)
 
